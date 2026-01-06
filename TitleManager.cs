@@ -1,172 +1,326 @@
-using Oxide.Core;
-using Oxide.Core.Libraries.Covalence;
-using Newtonsoft.Json;
+using Oxide.Core.Plugins;
+using Oxide.Game.Rust.Cui;
 using System.Collections.Generic;
-using System.Linq;
-
-#if RUST
 using UnityEngine;
-using ConVar;
-#endif
 
 namespace Oxide.Plugins
 {
-    [Info("TitleManager", "Fadir", "1.3.0")]
-    [Description("Standalone title & chat prefix system driven purely by permissions.")]
-    public class TitleManager : CovalencePlugin
+    [Info("TitleManager", "FadirStave", "1.0.3")]
+    [Description("UI-based chat title selector for BetterChat (restored UI + correct toggling)")]
+    public class TitleManager : RustPlugin
     {
-        private ConfigData config;
-        private string PermPrefix => Name.ToLower();
+        private const string UI_NAME = "TitleManager.UI";
 
-        // Vanilla-like colors
-        private const string AdminColor = "#55ff55";
-        private const string PlayerColor = "#5af";
+        [PluginReference] private Plugin ImageLibrary;
 
-        #region Config
+        private const string BG_IMAGE_ID = "titlemanager_bg";
+        private const string BG_IMAGE_URL = "https://cdn3.mapstr.gg/deca10271d9d3441ad21d1580d39468b.png";
 
-        private class TitleEntry
+        // BetterChat default group (your server uses "default")
+        private const string DEFAULT_GROUP = "default";
+
+        // 🎨 UI Colors
+        private const string OVERLAY = "0 0 0 0.85";
+        private const string FRAME = "0.18 0.18 0.18 0.75";
+        private const string BORDER = "0.58 0.24 0.24 0.85";      // thin red border
+        private const string PARCHMENT = "0.94 0.88 0.76 0.90";  // parchment color
+        private const string WHITE = "1 1 1 1";
+        private const string TEXT_DARK = "0.18 0.12 0.07 1";
+        private const string BUTTON_RED = "0.58 0.24 0.24 0.95";
+        private const string BUTTON_GREY = "0.45 0.45 0.45 0.55";
+
+        private const string RUSTY_ORANGE = "#C66A2B";
+
+        // Title groups ONLY (do not include default here)
+        private readonly List<string> TitleGroups = new()
         {
-            [JsonProperty("Text")]
-            public string Text = "TITLE";
-
-            [JsonProperty("Color")]
-            public string Color = "#7A1F1F";
-
-            [JsonProperty("Permission")]
-            public string Permission = "esquire";
-
-            [JsonProperty("Priority")]
-            public int Priority = 0;
-        }
-
-        private class ConfigData
-        {
-            [JsonProperty("Titles")]
-            public Dictionary<string, TitleEntry> Titles = new Dictionary<string, TitleEntry>();
-
-            [JsonProperty("Chat Format")]
-            public string ChatFormat = "{Title} {Name}: {Message}";
-        }
-
-        protected override void LoadDefaultConfig()
-        {
-            config = new ConfigData
-            {
-                ChatFormat = "{Title} {Name}: {Message}",
-                Titles = new Dictionary<string, TitleEntry>
-                {
-                    ["esquire"] = new TitleEntry
-                    {
-                        Text = "Esquire",
-                        Color = "#7A1F1F",
-                        Permission = "esquire",
-                        Priority = 10
-                    }
-                }
-            };
-        }
-
-        protected override void LoadConfig()
-        {
-            base.LoadConfig();
-            config = Config.ReadObject<ConfigData>();
-            SaveConfig();
-        }
-
-        protected override void SaveConfig() => Config.WriteObject(config, true);
-
-        #endregion
+            "esquire",
+            "fisherman",
+            "hunter",
+            "diver",
+            "lumberjack",
+            "pirate",
+            "bountyhunter",
+            "explorer",
+            "smasher"
+        };
 
         #region Init
 
         private void OnServerInitialized()
         {
-            RegisterPermissions();
-        }
-
-        private void RegisterPermissions()
-        {
-            foreach (var t in config.Titles.Values)
-            {
-                var perm = GetPerm(t);
-                if (!permission.PermissionExists(perm))
-                    permission.RegisterPermission(perm, this);
-            }
+            // Cache image for RawImage usage (same pattern as your InfoPanel)
+            ImageLibrary?.Call("AddImage", BG_IMAGE_URL, BG_IMAGE_ID);
         }
 
         #endregion
 
-        #region Chat Hook
+        #region Chat Command
 
-#if RUST
-        private object OnPlayerChat(BasePlayer basePlayer, string message, Chat.ChatChannel channel)
+        [ChatCommand("title")]
+        private void CmdTitle(BasePlayer player, string command, string[] args)
         {
-            var player = basePlayer.IPlayer;
-            var title = GetPlayerTitle(player);
+            if (player == null) return;
+            DrawUI(player);
+        }
 
-            // No title → vanilla Rust chat
-            if (title == null)
-                return null;
+        #endregion
 
-            var titleText = FormatTitle(title);
+        #region UI
 
-            // Apply vanilla-like name coloring
-            var isAdmin = basePlayer.IsAdmin || permission.UserHasPermission(player.Id, "admin");
-            var nameColor = isAdmin ? AdminColor : PlayerColor;
-            var nameText = $"<color={nameColor}>{basePlayer.displayName}</color>";
+        private void DrawUI(BasePlayer player)
+        {
+            CuiHelper.DestroyUi(player, UI_NAME);
+            var container = new CuiElementContainer();
 
-            var output = config.ChatFormat
-                .Replace("{Title}", titleText)
-                .Replace("{Name}", nameText)
-                .Replace("{Message}", message);
-
-            if (channel == Chat.ChatChannel.Team)
+            // Overlay (cursor enabled so buttons are clickable)
+            container.Add(new CuiPanel
             {
-                var team = basePlayer.Team;
-                if (team != null)
+                Image = { Color = OVERLAY },
+                RectTransform = { AnchorMin = "0 0", AnchorMax = "1 1" },
+                CursorEnabled = true
+            }, "Overlay", UI_NAME);
+
+            // Frame
+            container.Add(new CuiPanel
+            {
+                Image = { Color = FRAME },
+                RectTransform = { AnchorMin = "0.34 0.22", AnchorMax = "0.66 0.78" }
+            }, UI_NAME, "TM.Frame");
+
+            // Thin border (half thickness feel)
+            container.Add(new CuiPanel
+            {
+                Image = { Color = BORDER },
+                RectTransform = { AnchorMin = "0.01 0.01", AnchorMax = "0.99 0.99" }
+            }, "TM.Frame", "TM.Border");
+
+            // Board (parchment)
+            container.Add(new CuiPanel
+            {
+                Image = { Color = PARCHMENT },
+                RectTransform = { AnchorMin = "0.01 0.01", AnchorMax = "0.99 0.99" }
+            }, "TM.Border", "TM.Board");
+
+            // Background image (80% alpha)
+            var bg = ImageLibrary?.Call<string>("GetImage", BG_IMAGE_ID);
+            if (!string.IsNullOrEmpty(bg))
+            {
+                container.Add(new CuiElement
                 {
-                    foreach (var id in team.members)
+                    Parent = "TM.Board",
+                    Components =
                     {
-                        var member = BasePlayer.FindByID(id);
-                        if (member != null)
-                            member.SendConsoleCommand("chat.add", (int)channel, basePlayer.userID, output);
+                        new CuiRawImageComponent
+                        {
+                            Png = bg,
+                            Color = "1 1 1 0.8"
+                        },
+                        new CuiRectTransformComponent
+                        {
+                            AnchorMin = "0 0",
+                            AnchorMax = "1 1"
+                        }
                     }
-                }
-            }
-            else
-            {
-                foreach (var p in BasePlayer.activePlayerList)
-                    p.SendConsoleCommand("chat.add", (int)channel, basePlayer.userID, output);
+                });
             }
 
-            Puts($"[{channel}] {basePlayer.displayName}: {message}");
-            return true; // Block default chat for titled players
+            // Close X
+            container.Add(new CuiButton
+            {
+                Button = { Color = BORDER, Command = "titlemanager.close" },
+                RectTransform = { AnchorMin = "0.92 0.92", AnchorMax = "0.97 0.97" },
+                Text = { Text = "X", FontSize = 14, Align = TextAnchor.MiddleCenter, Color = WHITE }
+            }, "TM.Board");
+
+            // Header bar (expanded) – BOTH lines must show
+            container.Add(new CuiPanel
+            {
+                Image = { Color = BORDER },
+                RectTransform = { AnchorMin = "0.06 0.72", AnchorMax = "0.94 0.90" }
+            }, "TM.Board", "TM.Header");
+
+            container.Add(new CuiLabel
+            {
+                RectTransform = { AnchorMin = "0.03 0.10", AnchorMax = "0.97 0.90" },
+                Text =
+                {
+                    Text =
+                        "<b>Earned titles are shown in red below.</b>\n" +
+                        "<size=12>Select one to wear it proudly, or choose None to go without.</size>",
+                    FontSize = 16,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = WHITE
+                }
+            }, "TM.Header");
+
+            // Buttons – pushed down (your requested layout)
+            AddButtons(container, player);
+
+            CuiHelper.AddUi(player, container);
         }
-#endif
+
+        private void AddButtons(CuiElementContainer container, BasePlayer player)
+        {
+            // ⬇ Buttons lower on purpose (your request)
+            float startY = 0.52f;
+
+            float buttonHeight = 0.075f;
+            float spacingY = 0.022f;
+
+            float leftX = 0.12f;
+            float rightX = 0.52f;
+            float width = 0.36f;
+
+            int index = 0;
+
+            // NONE always available
+            AddButton(container, player, "none", "None", true, index++, leftX, rightX, startY, buttonHeight, spacingY, width);
+
+            // Always show placeholders; grey unless unlocked
+            foreach (var title in TitleGroups)
+            {
+                bool unlocked = HasTitleUnlocked(player, title);
+                AddButton(container, player, title, UpperFirst(title), unlocked, index++, leftX, rightX, startY, buttonHeight, spacingY, width);
+            }
+        }
+
+        private void AddButton(
+            CuiElementContainer container,
+            BasePlayer player,
+            string title,
+            string label,
+            bool enabled,
+            int index,
+            float leftX,
+            float rightX,
+            float startY,
+            float height,
+            float spacing,
+            float width)
+        {
+            float yMin = startY - (index / 2) * (height + spacing);
+            float yMax = yMin + height;
+
+            float xMin = (index % 2 == 0) ? leftX : rightX;
+            float xMax = xMin + width;
+
+            container.Add(new CuiButton
+            {
+                Button =
+                {
+                    Color = enabled ? BUTTON_RED : BUTTON_GREY,
+                    Command = enabled ? $"titlemanager.set {title}" : ""
+                },
+                RectTransform =
+                {
+                    AnchorMin = $"{xMin} {yMin}",
+                    AnchorMax = $"{xMax} {yMax}"
+                },
+                Text =
+                {
+                    Text = label,
+                    FontSize = 12,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = TEXT_DARK
+                }
+            }, "TM.Board");
+        }
 
         #endregion
 
-        #region Title Logic
+        #region Logic
 
-        private string GetPerm(TitleEntry t)
+        [ConsoleCommand("titlemanager.set")]
+        private void CmdSetTitle(ConsoleSystem.Arg arg)
         {
-            return t.Permission.StartsWith($"{PermPrefix}.")
-                ? t.Permission
-                : $"{PermPrefix}.{t.Permission}";
+            var player = arg.Player();
+            if (player == null || arg.Args == null || arg.Args.Length < 1) return;
+
+            string selected = arg.Args[0].ToLower();
+            string id = player.UserIDString;
+
+            // Safety: NONE always allowed, titles must be unlocked
+            if (selected != "none" && !HasTitleUnlocked(player, selected))
+            {
+                player.ChatMessage("You haven't earned that title yet.");
+                return;
+            }
+
+            if (selected == "none")
+            {
+                // Clear ONLY title groups (do NOT touch permissions)
+                RemoveAllTitleGroups(id);
+
+                // Always ensure default group is applied
+                ConsoleSystem.Run(ConsoleSystem.Option.Server, $"chat user add {id} {DEFAULT_GROUP}");
+
+                player.ChatMessage("Chat title cleared.");
+                return;
+            }
+
+            // If already active, do nothing (prevents “clears everything” feeling)
+            if (permission.UserHasGroup(id, selected))
+            {
+                player.ChatMessage("That title is already active.");
+                return;
+            }
+
+            // Remove other title groups, but do NOT “disable” anything
+            foreach (var group in TitleGroups)
+            {
+                if (group != selected && permission.UserHasGroup(id, group))
+                    ConsoleSystem.Run(ConsoleSystem.Option.Server, $"chat user remove {id} {group}");
+            }
+
+            // Remove default to keep one visible title (matches your original behavior/logs)
+            if (permission.UserHasGroup(id, DEFAULT_GROUP))
+                ConsoleSystem.Run(ConsoleSystem.Option.Server, $"chat user remove {id} {DEFAULT_GROUP}");
+
+            // Apply selected
+            ConsoleSystem.Run(ConsoleSystem.Option.Server, $"chat user add {id} {selected}");
+
+            player.ChatMessage($"Chat title set to <color={RUSTY_ORANGE}>{UpperFirst(selected)}</color>");
         }
 
-        private TitleEntry GetPlayerTitle(IPlayer player)
+        private void RemoveAllTitleGroups(string userId)
         {
-            return config.Titles.Values
-                .Where(t => permission.UserHasPermission(player.Id, GetPerm(t)))
-                .OrderByDescending(t => t.Priority)
-                .FirstOrDefault();
+            foreach (var group in TitleGroups)
+            {
+                if (permission.UserHasGroup(userId, group))
+                    ConsoleSystem.Run(ConsoleSystem.Option.Server, $"chat user remove {userId} {group}");
+            }
         }
 
-        private string FormatTitle(TitleEntry title)
+        private bool HasTitleUnlocked(BasePlayer player, string title)
         {
-            var color = title.Color.StartsWith("#") ? title.Color : $"#{title.Color}";
-            return $"<color={color}>[{title.Text}]</color>";
+            // Unlock condition: either a permission (quest reward style) OR they’re already in that group
+            return permission.UserHasPermission(player.UserIDString, $"title.{title}")
+                   || permission.UserHasGroup(player.UserIDString, title);
+        }
+
+        [ConsoleCommand("titlemanager.close")]
+        private void CmdClose(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            CuiHelper.DestroyUi(player, UI_NAME);
+        }
+
+        #endregion
+
+        #region Helpers
+
+        private static string UpperFirst(string input)
+        {
+            if (string.IsNullOrEmpty(input)) return input;
+            return char.ToUpper(input[0]) + input.Substring(1);
+        }
+
+        private void Unload()
+        {
+            foreach (var player in BasePlayer.activePlayerList)
+                CuiHelper.DestroyUi(player, UI_NAME);
         }
 
         #endregion
